@@ -1,4 +1,5 @@
 import json;
+import ast;
 null = None;
 
 def classof(obj):
@@ -40,6 +41,16 @@ class Array:
             return Array([*filter(ftn,self._itr)]);
         else:
             return null;
+    def some(self, ftn):
+        if (classof(ftn) == "method" or classof(ftn) == "function"):
+            return any(self.map(ftn));
+        else:
+            return null;
+    def every(self, ftn):
+        if (classof(ftn) == "method" or classof(ftn) == "function"):
+            return all(self.map(ftn));
+        else:
+            return null;
     def map(self, ftn):
         if (classof(ftn) == "method" or classof(ftn) == "function"):
             return Array([*map(ftn,self._itr)]);
@@ -63,8 +74,6 @@ class Array:
     def sort(self, ftn):
         self._itr = sorted(self._itr, key=functools.cmp_to_key(ftn));
         return self;
-    def all(self):
-        return all(self._itr);
     def slice(self, start, *end):
         if (len(end) == 1):
             return Array(self._itr[start:end[0]]);
@@ -256,7 +265,7 @@ class JSON:
     @staticmethod
     def parse(string):
         def convertToJS(obj):
-            if (classof(obj) == "string"):
+            if (classof(obj) == "str"):
                 return String(obj);
             elif (classof(obj) == "dict"):
                 tmpObj = Map(obj);
@@ -264,10 +273,26 @@ class JSON:
                 return tempObj;
             elif (classof(obj) == "list"):
                 return Array(obj).map(lambda ele: convertToJS(ele));
-        print(str(string));
         preObj = json.loads(str(string));
         return convertToJS(preObj);
     @staticmethod
     def stringify(obj):
         return json.dumps(obj, separators=(',', ':'));
+
+class AST:
+    @staticmethod
+    def parse(string):
+        def convertToJS(obj):
+            if (classof(obj) == "str"):
+                return String(obj);
+            elif (classof(obj) == "dict"):
+                tmpObj = Map(obj);
+                tmpObj.forEach(lambda v,k,m: m.set(k, convertToJS(v)));
+                return tmpObj;
+            elif (classof(obj) == "list"):
+                return Array(obj).map(lambda ele: convertToJS(ele));
+            else:
+                return obj;
+        preObj = ast.literal_eval(str(string));
+        return convertToJS(preObj);
 
