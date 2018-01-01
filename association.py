@@ -59,6 +59,12 @@ def pairwise(iterable):
 	return zip(first, second)
 
 def _split(value):
+	'''
+	Args:
+		value(string): contents to be splited ','
+	Returns:
+		(list): Return list contain splited attributes value 		
+	'''
 	split = value.split(':')
 	header = split[0]	
 	contents = split[1].split(',')
