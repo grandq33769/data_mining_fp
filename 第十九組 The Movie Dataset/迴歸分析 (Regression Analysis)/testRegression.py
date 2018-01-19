@@ -15,7 +15,7 @@ TRAINING_RATIO = 0.8;
 # 資料來源 (使用 testAnalysis.py 的結果)
 DATASET = "tempData5.csv";
 # 理想 R2
-THRESHOLD = -25
+THRESHOLD = 0.5;
 
 
 # ------------------- 第一步 -------------------
@@ -124,8 +124,7 @@ def createColumn(data, header, colFtnAry):
     data.forEach(lambda row,idx,ary: colFtnAry.forEach(lambda colFtn, idx2, ary2: row.push(colFtn[1](row))));
 
 createColumn(movieData, movieHeader, JS.Array([["revPop", lambda row: math.log((max(row[getColNo("revenueNorm")], 0.000001))/(max(row[getColNo("popularity")],0.000001)))]
-                                             
-]));
+                                              ]));
 
 # ------------------- 第三步 -------------------
 # 資料分析：
@@ -134,31 +133,49 @@ createColumn(movieData, movieHeader, JS.Array([["revPop", lambda row: math.log((
 # 若然 R-Square 很高 (>=0.7)，把所有 Test Data 匯出，仔細瞭解預測數字
 print("第三步: 資料分析...");
 
-def regression(dataset, filename, trialName, featureColNames, outputColName, outputColNameNormalized = "", name="", tfSteps=1000, recoverFtn = lambda x:x, useTF = True):
+# ---------------- regression() ----------------
+# 從資料集中，指定要測試的項目及模成組成，進行 Regression 分析
+# 提供兩種訓練方法：Tensorflow / SK-Learn
+# 部分 y 可能是修正後(如正規化/對數)，需提供其還原函數 lambda function，以進行準確度測試
+def regression(dataset, filename, trialName, featureColNames, oriOutputCol, outputCol = "", name="", tfSteps=1000, recoverFtn = lambda x:x, useTF = True):
     print("\n\n迴歸分析:", name);
+    print("資料準備中...");
+    # -------- 資料準備 --------
+    # 1. 所有資料會重新隨機排序
+    # 2. 分割 Training / Testing 訓練/測試資料
     random.shuffle(dataset, random.seed());
     trainingCount = round(TRAINING_RATIO*dataset.length);
     trainData = dataset.slice(0,trainingCount);
     testData = dataset.slice(trainingCount);
 
-    isNormOut =bool(len(outputColNameNormalized)>0);
-    
+    # 3. 檢查是否需要還原正規化/轉化值
+    isOutputAdjusted =bool(len(oriOutputCol)>0) and outputCol != oriOutputCol;
+
+    # 4. 擷取資料集，並獨立分隔 Train/Test 資料，及是否修改的 y
     colX = [movieHeader.indexOf(i) for i in featureColNames];
-    colY = movieHeader.indexOf(outputColName);
-    colYNorm = movieHeader.indexOf(outputColNameNormalized) if isNormOut else None ;
+    colY = movieHeader.indexOf(oriOutputCol);
+    colYAdj = movieHeader.indexOf(outputCol) if isOutputAdjusted else None ;
     
     trainY = trainData.map(lambda row: [row[colY]]);
     trainX = trainData.map(lambda row: [row[i] for i in colX]);
-    trainYNorm = trainData.map(lambda row: [row[colYNorm]]) if isNormOut else None ;
+    trainYAdj = trainData.map(lambda row: [row[colYAdj]]) if isOutputAdjusted else None ;
     
     testY = testData.map(lambda row: [row[colY]]);
     testX = testData.map(lambda row: [row[i] for i in colX]);
-    testYNorm = testData.map(lambda row: [row[colYNorm]]) if isNormOut else None ;
+    testYAdj = testData.map(lambda row: [row[colYAdj]]) if isOutputAdjusted else None ;
 
+    # 5. 初始化部分資料
+    # outputInfo 是這次運算的項目，會是一列數據，指出是哪個嘗試和他的結果
     outputInfo = JS.Array([trialName, name]);
 
-    r2TF = r2SK = 0;
+    # -------- Tensorflow --------
+    # 如使用 Tensorflow 作迴歸分析，處理如下：
     if (useTF):
+        print("TensorFlow 處理: ");
+
+        # 方便的變數設定函數定義
+        # Weight 會以 Truncated Normal Distribution 初始化，standard deviation = 0.1
+        # Bias 會以 0.1 為初始值
         def weight_variable(shape):
           initial = tf.truncated_normal(shape, stddev=0.1)
           return tf.Variable(initial)
@@ -167,36 +184,44 @@ def regression(dataset, filename, trialName, featureColNames, outputColName, out
           initial = tf.constant(0.1, shape=shape)
           return tf.Variable(initial)
 
+        # 因為 Tensorflow 會跑很多不同的模型，先把其重設
         tf.reset_default_graph();
+
+        # 留意目前有多個 x independent variables，
+        # 並設定 y = Wx+b 的架構，
+        # 而 actualY 會是代入實際結果的 placeholder
         noOfFeatures = len(colX);
         actualY = tf.placeholder(shape=[None, 1], dtype=np.float32);
         x = tf.placeholder(shape=[None, noOfFeatures], dtype=np.float32);
-
         W = weight_variable([noOfFeatures, 1]);
         b = bias_variable([1]);
         y = tf.matmul(x, W)+ b;
 
+        # Learning Rate 是變數，會視乎訓練情況而改變，但初始值為 0.01
+        # Loss Function 是 RMS ，並以 Adam Optimizer 進行 Gradient Descent
         learningRate = tf.Variable(0.01, trainable=False);
         loss = tf.reduce_mean(tf.squared_difference(y, actualY)); 
         train_step = tf.train.AdamOptimizer(learningRate).minimize(loss);
 
         with tf.Session() as sess:
+            # 訓練先要把所有值正式初始化
             tf.global_variables_initializer().run();
 
+            # 訓練過種中的變數，去判斷是否是停下來或改變 Learning Rate
+            # 這次的訓練方式，是以每 100 次訓練的 Loss 改變為基準，
+            # 若是 Loss 改變不大，則會決定是否需要調低 Learning Rate，
+            # 否則若再降不下 Learning Rate 則會停止訓練
             lastLoss = 0;
             training = 1;
             decLearningRate = 2;
             m = 0;
             while True:
-                step, lossout, lrNow = sess.run([train_step, loss, learningRate], feed_dict={x: trainX, actualY: (trainYNorm if isNormOut else trainY)});
+                step, lossout, lrNow = sess.run([train_step, loss, learningRate], feed_dict={x: trainX, actualY: (trainYAdj if isOutputAdjusted else trainY)});
                 if m==0:
                     lastLoss = lossout*2;
-
                 m = m + 1;
-                
                 if (m%100 == 0):
-                    print("Step: ", m ,"; Loss:", lossout, "; Learning Rate:", lrNow);
-
+                    print("訓練步數: ", m ,"; Loss:", lossout, "; Learning Rate:", lrNow);
                     if (abs(lossout - lastLoss)/lastLoss < 0.01):
                         if training == 0:
                             if decLearningRate > 0:
@@ -209,75 +234,91 @@ def regression(dataset, filename, trialName, featureColNames, outputColName, out
                         else:
                             training = training - 1;
                     lastLoss = lossout;
-            #Test
-            rms = tf.reduce_mean(tf.squared_difference(y, actualY)); 
-            predictScores, rmsValue = (sess.run([y, rms], feed_dict={x: testX, actualY: (testYNorm if isNormOut else testY)}));
 
-            predictDiff = JS.Array();
-            predictScores=JS.Array(predictScores).map(lambda s: float(s[0]));
-            predictScoresRecovered = predictScores.map(lambda s: (recoverFtn(s) if isNormOut else s));
-            testY2 = JS.Array(testY).map(lambda s: float(s[0]));
-            
-            predictScoresRecovered.forEach(lambda s,i,ary: predictDiff.push(abs(s - testY2[i]) / abs(testY2[i])));
-            print("TensorFlow: ");
+            # Tensorflow 測試：
+            # 同樣地以 RMS 作為測試基準
+            # 但同時就會個測試項目，列出模型訓練結果
+            rms = tf.reduce_mean(tf.squared_difference(y, actualY)); 
+            predictYTF, rmsValue = (sess.run([y, rms], feed_dict={x: testX, actualY: (testYAdj if isOutputAdjusted else testY)}));
+            print("TensorFlow 結果: ");
             print("RMS: ",rmsValue);
             outputInfo.push(rmsValue);
-            aep =(sum(predictDiff)/predictDiff.length*100);
+            
+            # 同時運算每一個測試項目的差異百分比平均值
+            predictYTF=JS.Array(predictYTF).map(lambda s: float(s[0]));
+            predictYTFRecovered = predictYTF.map(lambda s: (recoverFtn(s) if isOutputAdjusted else s));
+            testY2 = JS.Array(testY).map(lambda s: float(s[0]));
+            predictDiffTF = JS.Array();
+            predictYTFRecovered.forEach(lambda s,i,ary: predictDiffTF.push(abs(s - testY2[i]) / abs(testY2[i])));
+            aep =(sum(predictDiffTF)/predictDiffTF.length*100);
             print("平均誤差百分比: ",aep);
             outputInfo.push(aep);
-            r2TF = r2_score(testY2, predictScoresRecovered)
+
+            # 同時運算 R-Square 值
+            r2TF = r2_score(testY2, predictYTFRecovered)
             print("R Square (還原值): ",r2TF);
             outputInfo.push(r2TF);
-            if isNormOut:
-                r2Norm = r2_score(testYNorm, predictScores);
-                print("R Square (正規化/轉移值): ",r2Norm);
-                outputInfo.push(r2Norm);
+            if isOutputAdjusted:
+                r2TFAdj = r2_score(testYAdj, predictYTF);
+                print("R Square (正規化/轉移值): ",r2TFAdj);
+                outputInfo.push(r2TFAdj);
 
+    # -------- SK Learn --------
+    # SK Learn 模型訓練：
     regr = linear_model.LinearRegression();
-    regr.fit(trainX, trainYNorm if isNormOut else trainY);
-    predY = regr.predict(testX);
-    print("\nSK Learn: ");
-    rmsValue = mean_squared_error(testYNorm if isNormOut else testY, predY);
+    regr.fit(trainX, trainYAdj if isOutputAdjusted else trainY);
+
+    # SK Learn 結果需要先取得預測值，再運算 RMS
+    predYSK = regr.predict(testX);
+    rmsValue = mean_squared_error(testYAdj if isOutputAdjusted else testY, predYSK);
+    print("\nSK Learn 結果: ");
     print("RMS: ", rmsValue);
     outputInfo.push(rmsValue);
-    predictDiff = JS.Array();
-    predY = JS.Array(predY).map(lambda s: float(s[0]));
-    predYRecovered = predY.map(lambda s: (recoverFtn(s) if isNormOut else s));
+
+    # 同時運算每一個測試項目的差異百分比平均值
+    predictDiffSK = JS.Array();
+    predYSK = JS.Array(predYSK).map(lambda s: float(s[0]));
+    predYSKRecovered = predYSK.map(lambda s: (recoverFtn(s) if isOutputAdjusted else s));
     testY2 = JS.Array(testY).map(lambda s: float(s[0]));
-    predYRecovered.forEach(lambda s,i,ary: predictDiff.push(abs(s - testY2[i]) / abs(testY2[i])));
-    aep2 =(sum(predictDiff)/predictDiff.length*100);
-    print("平均誤差百分比: ",aep2);
-    outputInfo.push(aep2);
-    r2SK = r2_score(testY2, predYRecovered)
+    predYSKRecovered.forEach(lambda s,i,ary: predictDiffSK.push(abs(s - testY2[i]) / abs(testY2[i])));
+    aepSK =(sum(predictDiffSK)/predictDiffSK.length*100);
+    print("平均誤差百分比: ",aepSK);
+    outputInfo.push(aepSK);
+
+    # 同時運算 R-Square 值
+    r2SK = r2_score(testY2, predYSKRecovered)
     print("R Square (還原值): ",r2SK);
     outputInfo.push(r2SK);
-    if isNormOut:
-        r2Norm = r2_score(testYNorm, predY);
-        print("R Square (正規化/轉移值): ",r2Norm);
-        outputInfo.push(r2Norm);
+    if isOutputAdjusted:
+        r2SKAdj = r2_score(testYAdj, predYSK);
+        print("R Square (正規化/轉移值): ",r2SKAdj);
+        outputInfo.push(r2SKAdj);
 
-    # Print full "test" table if it's of acceptable accuracy
+    # -------- 詳細結果儲存 --------
+    # 如 R-Square 在 THRESHOLD 值之上，則把整個測試結果存下來仔細觀察
     if (useTF):
         if (r2TF >= THRESHOLD or r2SK >= THRESHOLD):
             with open(filename + "-Result-" + trialName + ".csv", 'w', newline='', encoding='utf-8-sig') as csvfile:
                 toWriter = csv.writer(csvfile);
-                toWriter.writerow([*featureColNames, outputColName, "Prediction (TF)", "Prediction (SK)"]);
+                toWriter.writerow([*featureColNames, outputCol, "Prediction (TF)", "Prediction (SK)"]);
                 for idx, row in enumerate(testX):
-                    toWriter.writerow([*row, testY[idx][0], predictScoresRecovered[idx], predYRecovered[idx]]);
+                    toWriter.writerow([*row, testY[idx][0], predictYTFRecovered[idx], predYSKRecovered[idx]]);
     else:
-        if (r2SK >= THRESHOLD or aep2<5.5):
+        if (r2SK >= THRESHOLD):
             with open(filename + "-Result-" + trialName + ".csv", 'w', newline='', encoding='utf-8-sig') as csvfile:
                 toWriter = csv.writer(csvfile);
-                toWriter.writerow([*featureColNames, outputColName, "Prediction (SK)"]);
+                toWriter.writerow([*featureColNames, outputCol, "Prediction (SK)"]);
                 for idx, row in enumerate(testX):
-                    toWriter.writerow([*row, testY[idx][0], predYRecovered[idx]]);
+                    toWriter.writerow([*row, testY[idx][0], predYSKRecovered[idx]]);
     return outputInfo;
 
-
-def regressionHandler(movieData, filename, trialName, revenueCol, inputs, recoverFtn=lambda x: (x-minRevenue)*(maxRevenue-minRevenue), useTF = True, oriCol = "revenue"):
+# ---------------- regressionHandler() ----------------
+# 允許透過 inputs 一次性地建立不同 x 模型
+# 所有模型完成後會把所有結果加入 (append) 到指定檔案中
+def regressionHandler(movieData, filename, trialName, outputCol, inputs, recoverFtn=lambda x: (x-minRevenue)*(maxRevenue-minRevenue), useTF = True, oriOutputCol = "revenue"):
     outputTable = JS.Array();
     for x in inputs:
-        outputInfo = regression(movieData, filename, trialName, x, oriCol, outputColNameNormalized = revenueCol, name=JS.Array(x).join(",")+" -> " + revenueCol, recoverFtn=recoverFtn, useTF=useTF);
+        outputInfo = regression(movieData, filename, trialName, x, oriOutputCol, outputCol = outputCol, name=JS.Array(x).join(",")+" -> " + outputCol, recoverFtn=recoverFtn, useTF=useTF);
         outputTable.push(outputInfo);
     with open(filename, 'a', newline='', encoding='utf-8-sig') as csvfile:
         toWriter = csv.writer(csvfile);
@@ -285,7 +326,9 @@ def regressionHandler(movieData, filename, trialName, revenueCol, inputs, recove
             toWriter.writerow(row);
     return outputTable;
 
-def autoRegressionHandler(movieData, filename, revenueCol_RecoverDict, inputDict, inputFilterDict, mustInputDict = {}, useTF = True, oriCol = "revenue"):
+# ---------------- autoRegressionHandler() ----------------
+# 自動組合不同參數，傳輸組合的模型至 regressionHandler() 進行訓練及測試
+def autoRegressionHandler(movieData, filename, outputCol_RecoverDict, inputDict, inputFilterDict, mustInputDict = {}, useTF = True, oriOutputCol = "revenue"):
     print("準備分析...");
     trialID = 0;
     outputTable = JS.Array();
@@ -300,8 +343,9 @@ def autoRegressionHandler(movieData, filename, revenueCol_RecoverDict, inputDict
             toWriter.writerow(["Trial", "Model", "TF RMS", "TF Error %", "TF R2", "TF R2 (normalized)", "SK RMS", "SK Error %", "SK R2", "SK R2 (normalized)"]);
         else:
             toWriter.writerow(["Trial", "Model", "SK RMS", "SK Error %", "SK R2", "SK R2 (normalized)"]);
-    for k, v in revenueCol_RecoverDict.items():
+    for k, v in outputCol_RecoverDict.items():
         for l in range(1,len(inputDict)+1):
+            # 透過 itertools.combinations ，建立不同參數的模型
             for x in itertools.combinations(inputDict.keys(), l):
                 allAttr = [*allMust];
                 for attrGroup in x:
@@ -311,11 +355,58 @@ def autoRegressionHandler(movieData, filename, revenueCol_RecoverDict, inputDict
                     if (attr in inputFilterDict):
                         colID = getColNo(attr); lambdaFtn = inputFilterDict[attr];
                         toTestData = toTestData.filter(lambda row: lambdaFtn(row[colID]));
-                outputTable.push(*regressionHandler(toTestData, filename, str(trialID), k, [allAttr], v, useTF = useTF, oriCol = oriCol));
+                outputTable.push(*regressionHandler(toTestData, filename, str(trialID), k, [allAttr], v, useTF = useTF, oriOutputCol = oriOutputCol));
                 trialID = trialID + 1;
 
-'''
-autoRegressionHandler(movieData, "regressionResults-0118-2200-basic",
+# -------------- 先導直覺性模型建設 --------------
+# 指定模型的參數，透過 regressionHandler()，
+# 就 revenueLog 及 revenueNorm 進行模型訓練及測試
+with open("preliminaryRegressions-Result-All.csv", 'w', newline='', encoding='utf-8-sig') as csvfile:
+   toWriter = csv.writer(csvfile);
+   toWriter.writerow(["Trial", "Model", "TF RMS", "TF Error %", "TF R2", "TF R2 (normalized)", "SK RMS", "SK Error %", "SK R2", "SK R2 (normalized)"]);
+
+regressionHandler(movieData, "preliminaryRegressions-Result-All.csv", "All", "revenueLog",
+                                    [["month"], ["year"],
+                                     ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                                     ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                                     ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                                     ["month", "year",
+                                     "Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4",
+                                     "Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2",
+                                     "Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"]
+                                     ],
+                                    lambda x: math.exp(x*(colInfo.get("revenueLog")[2]-colInfo.get("revenueLog")[1])+colInfo.get("revenueLog")[1]));
+
+regressionHandler(movieData, "preliminaryRegressions-Result-All.csv", "All", "revenueNorm",
+                                    [["month"], ["year"],
+                                     ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                                     ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                                     ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                                     ["month", "year",
+                                     "Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4",
+                                     "Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2",
+                                     "Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"]
+                                     ],
+                                    lambda x: x*(colInfo.get("revenueNorm")[2]-colInfo.get("revenueNorm")[1])+colInfo.get("revenueNorm")[1]);
+
+
+
+
+# -------------- 自動「暴力法」建設 --------------
+# 0: 測試項目，以比較少的欄位進行測試
+autoRegressionHandler(movieData, "regressionResults-revenue-warmup",
+                      {"revenueNorm": lambda x: x*(colInfo.get("revenueNorm")[2]-colInfo.get("revenueNorm")[1])+colInfo.get("revenueNorm")[1],
+                       "revenueLog": lambda x: math.exp(x*(colInfo.get("revenueLog")[2]-colInfo.get("revenueLog")[1])+colInfo.get("revenueLog")[1])},
+                      {"year": ["year"], "budget": ["budget"], 
+                       "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                       "genre": ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                       "month": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"],
+                       },
+                      {"budget": lambda val: val is not None,
+                       "runtime": lambda val: val > 0}, useTF = True);
+
+# 1a: 基本模型 => revenue
+autoRegressionHandler(movieData, "regressionResults-revenue-basic",
                       {"revenueNorm": lambda x: x*(colInfo.get("revenueNorm")[2]-colInfo.get("revenueNorm")[1])+colInfo.get("revenueNorm")[1],
                        "revenueLog": lambda x: math.exp(x*(colInfo.get("revenueLog")[2]-colInfo.get("revenueLog")[1])+colInfo.get("revenueLog")[1])},
                       {"year": ["year"], "budget": ["budget"], "runtime": ["runtime"],
@@ -329,7 +420,8 @@ autoRegressionHandler(movieData, "regressionResults-0118-2200-basic",
                       {"budget": lambda val: val is not None,
                        "runtime": lambda val: val > 0}, useTF = False);
 
-autoRegressionHandler(movieData, "regressionResults-0118-2200-runtimeSquare",
+# 1b: 基本模型, 固定使用 rumtime-square => revenue
+autoRegressionHandler(movieData, "regressionResults-revenue-runtimeSquare",
                       {"revenueNorm": lambda x: x*(colInfo.get("revenueNorm")[2]-colInfo.get("revenueNorm")[1])+colInfo.get("revenueNorm")[1],
                        "revenueLog": lambda x: math.exp(x*(colInfo.get("revenueLog")[2]-colInfo.get("revenueLog")[1])+colInfo.get("revenueLog")[1])},
                       {"year": ["year"], "budget": ["budget"],
@@ -344,7 +436,8 @@ autoRegressionHandler(movieData, "regressionResults-0118-2200-runtimeSquare",
                        "runtimeSquare": lambda val: val > 0},
                       {"runtimeSquare": ["runtimeSquare"]}, useTF = False);
 
-autoRegressionHandler(movieData, "regressionResults-0118-2200-budgetLog&runtimeSquare",
+# 1c: 基本模型, 固定使用 rumtime-square, budget-log => revenue
+autoRegressionHandler(movieData, "regressionResults-revenue-budgetLog&runtimeSquare",
                       {"revenueNorm": lambda x: x*(colInfo.get("revenueNorm")[2]-colInfo.get("revenueNorm")[1])+colInfo.get("revenueNorm")[1],
                        "revenueLog": lambda x: math.exp(x*(colInfo.get("revenueLog")[2]-colInfo.get("revenueLog")[1])+colInfo.get("revenueLog")[1])},
                       {"year": ["year"], 
@@ -359,7 +452,8 @@ autoRegressionHandler(movieData, "regressionResults-0118-2200-budgetLog&runtimeS
                        "runtimeSquare": lambda val: val > 0},
                       {"budgetLog": ["budgetLog"], "runtimeSquare": ["runtimeSquare"]}, useTF = False);
 
-autoRegressionHandler(movieData, "regressionResults-0118-2200-budgetSquare&runtimeSquare",
+# 1d: 基本模型, 固定使用 rumtime-square, budget-log => revenue
+autoRegressionHandler(movieData, "regressionResults-revenue-budgetSquare&runtimeSquare",
                       {"revenueNorm": lambda x: x*(colInfo.get("revenueNorm")[2]-colInfo.get("revenueNorm")[1])+colInfo.get("revenueNorm")[1],
                        "revenueLog": lambda x: math.exp(x*(colInfo.get("revenueLog")[2]-colInfo.get("revenueLog")[1])+colInfo.get("revenueLog")[1])},
                       {"year": ["year"], 
@@ -372,11 +466,71 @@ autoRegressionHandler(movieData, "regressionResults-0118-2200-budgetSquare&runti
                        },
                       {"budgetSquare": lambda val: val is not None,
                        "runtimeSquare": lambda val: val > 0},
-                      {"budgetSquare": ["budgetSquare"], "runtimeSquare": ["runtimeSquare"]}, useTF = False)
+                      {"budgetSquare": ["budgetSquare"], "runtimeSquare": ["runtimeSquare"]}, useTF = False);
 
-'''
 
-autoRegressionHandler(movieData, "regressionResults-0119-0020-revPop-basic",
+# 2a: 基本模型 => popularity
+autoRegressionHandler(movieData, "regressionResults-popularity-basic",
+                      {"popularityNorm": lambda x: x*(colInfo.get("popularityNorm")[2]-colInfo.get("popularityNorm")[1])+colInfo.get("popularityNorm")[1]},
+                      {"year": ["year"], "budget": ["budget"], "runtime": ["runtime"],
+                       "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                       "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
+                       "genre": ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                       "production_company": ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                       "month": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"],
+                       "production_country": ["Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France","Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2","Production Country-Seg-3"]
+                       },
+                      {"budget": lambda val: val is not None,
+                       "runtime": lambda val: val > 0}, useTF = False, oriOutputCol = "popularityNorm");
+
+# 2b: 基本模型, 固定使用 rumtime-square, budget-log => popularity
+autoRegressionHandler(movieData, "regressionResults-popularity-runtimeSquare",
+                      {"popularityNorm": lambda x: x*(colInfo.get("popularityNorm")[2]-colInfo.get("popularityNorm")[1])+colInfo.get("popularityNorm")[1]},
+                      {"year": ["year"], "budget": ["budget"],
+                       "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                       "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
+                       "genre": ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                       "production_company": ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                       "month": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"],
+                       "production_country": ["Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France","Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2","Production Country-Seg-3"]
+                       },
+                      {"budget": lambda val: val is not None,
+                       "runtimeSquare": lambda val: val > 0},
+                      {"runtimeSquare": ["runtimeSquare"]}, useTF = False, oriOutputCol = "popularityNorm");
+
+# 2c: 基本模型, 固定使用 rumtime-square, budget-log => popularity
+autoRegressionHandler(movieData, "regressionResults-popularity-budgetLog&runtimeSquare",
+                      {"popularityNorm": lambda x: x*(colInfo.get("popularityNorm")[2]-colInfo.get("popularityNorm")[1])+colInfo.get("popularityNorm")[1]},
+                      {"year": ["year"], 
+                       "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                       "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
+                       "genre": ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                       "production_company": ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                       "month": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"],
+                       "production_country": ["Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France","Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2","Production Country-Seg-3"]
+                       },
+                      {"budgetLog": lambda val: val is not None,
+                       "runtimeSquare": lambda val: val > 0},
+                      {"budgetLog": ["budgetLog"], "runtimeSquare": ["runtimeSquare"]}, useTF = False, oriOutputCol = "popularityNorm");
+
+# 2d: 基本模型, 固定使用 rumtime-square, budget-log => popularity
+autoRegressionHandler(movieData, "regressionResults-popularity-budgetSquare&runtimeSquare",
+                      {"popularityNorm": lambda x: x*(colInfo.get("popularityNorm")[2]-colInfo.get("popularityNorm")[1])+colInfo.get("popularityNorm")[1]},
+                      {"year": ["year"], 
+                       "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                       "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
+                       "genre": ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                       "production_company": ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                       "month": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"],
+                       "production_country": ["Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France","Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2","Production Country-Seg-3"]
+                       },
+                      {"budgetSquare": lambda val: val is not None,
+                       "runtimeSquare": lambda val: val > 0},
+                      {"budgetSquare": ["budgetSquare"], "runtimeSquare": ["runtimeSquare"]}, useTF = False, oriOutputCol = "popularityNorm");
+
+
+# 3a: 基本模型 => revpop
+autoRegressionHandler(movieData, "regressionResults-revPop-basic",
                       {"revPop": lambda x: x},
                       {"year": ["year"], "budget": ["budget"], "runtime": ["runtime"],
                        "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
@@ -387,4 +541,4 @@ autoRegressionHandler(movieData, "regressionResults-0119-0020-revPop-basic",
                        "production_country": ["Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France","Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2","Production Country-Seg-3"]
                        },
                       {"budget": lambda val: val is not None,
-                       "runtime": lambda val: val > 0}, useTF = False, oriCol = "revPop");
+                       "runtime": lambda val: val > 0}, useTF = False, oriOutputCol = "revPop");

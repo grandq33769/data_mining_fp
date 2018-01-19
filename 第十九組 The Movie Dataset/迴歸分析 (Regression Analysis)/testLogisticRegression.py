@@ -78,7 +78,7 @@ modifyColumn(movieData, movieHeader, JS.Array([[JS.Array(["adult"]), lambda row,
                                                 "Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France",
                                                 "Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2",
                                                 "Production Country-Seg-3","Spoken Language_en_English","Spoken Language-Seg-1","Spoken Language-Seg-2","Spoken Language-Seg-3"]), lambda row,colID: int(row[colID])],
-                                             [JS.Array(["revenue","budget"]), lambda row,colID: float(row[colID])],
+                                             [JS.Array(["revenue","budget","popularity"]), lambda row,colID: float(row[colID])],
                                              [JS.Array(["runtime"]), lambda row,colID: float(row[colID]) if row[colID] else 0]]));
 modifyColumn(movieData, movieHeader, JS.Array([[JS.Array(["budget"]), lambda row,colID: row[colID] if row[colID] >= 1000 else None]]));
 
@@ -91,7 +91,9 @@ def createColumn(data, header, colFtnAry):
     header.push(*colFtnAry.map(lambda colFtn: colFtn[0]));
     data.forEach(lambda row,idx,ary: colFtnAry.forEach(lambda colFtn, idx2, ary2: row.push(colFtn[1](row))));
 
-createColumn(movieData, movieHeader, JS.Array([["budgetLog", lambda row: math.log(row[getColNo("budget")]) if row[getColNo("budget")] is not None else None],
+createColumn(movieData, movieHeader, JS.Array([["revenueNorm", lambda row: row[getColNo("revenue")]],
+                                               ["revenueLog", lambda row: math.log(row[getColNo("revenue")])],
+                                               ["budgetLog", lambda row: math.log(row[getColNo("budget")]) if row[getColNo("budget")] is not None else None],
                                                ["budgetSquare", lambda row: row[getColNo("budget")]**2 if row[getColNo("budget")] is not None else None],
                                                ["runtimeSquare", lambda row: row[getColNo("runtime")]**2]
                                              
@@ -110,7 +112,7 @@ def normalization(data, header, colNames):
     data.forEach(lambda row,idx,ary: colInfo.forEach(lambda colInfo, colName, m: normalizeValue(row, colInfo)));
     return colInfo;
 
-colInfo = normalization(movieData, movieHeader, JS.Array(["runtime", "budget", "revenueNorm", "revenueLog"]));
+colInfo = normalization(movieData, movieHeader, JS.Array(["runtime", "budget", "revenueNorm", "revenueLog", "popularity"]));
 
 # ------------------- 第二步 - X -------------------
 # 將會新增欄位：
@@ -138,7 +140,7 @@ def createClassByRank(data, header, colFtnAry):
         
     data.forEach(lambda row,idx,ary: colFtnAry.forEach(lambda colFtn, idx2, ary2: row.push(colFtn[1].findIndex(lambda toRange: row[colFtn[0]] >= toRange[0] and row[colFtn[0]]<=toRange[1])+1)));
         
-colInfo = createClassByRank(movieData, movieHeader, JS.Array([["revenue", 8], ["revPop", 8]]));
+colInfo = createClassByRank(movieData, movieHeader, JS.Array([["revenue", 8], ["revPop", 3]]));
 
 # ------------------- 第三步 -------------------
 # 資料分析：
@@ -147,6 +149,8 @@ colInfo = createClassByRank(movieData, movieHeader, JS.Array([["revenue", 8], ["
 # 若然 R-Square 很高 (>=0.7)，把所有 Test Data 匯出，仔細瞭解預測數字
 print("第三步: 資料分析...");
 
+# Logistic Regression 函數
+# 使用 sklearn 進行 logistic regression
 def regression(dataset, filename, trialName, featureColNames, outputColName, outputColNameNormalized = "", name="", tfSteps=1000):
     print("\n\n迴歸分析:", name);
     random.shuffle(dataset, random.seed());
@@ -219,9 +223,10 @@ def autoRegressionHandler(movieData, filename, targetClass, inputDict, inputFilt
                 outputTable.push(*regressionHandler(toTestData, filename, str(trialID), targetClass, [allAttr]));
                 trialID = trialID + 1;
 
-'''
 
-autoRegressionHandler(movieData, "logisticRegressionResults-0118-2330-basic","revenue (Class)",
+# -------------- 自動「暴力法」建設 --------------
+# 1a: 基本模型 => revenue
+autoRegressionHandler(movieData, "logisticRegressionResults-revenue-basic","revenue (Class)",
                       {"year": ["year"], "budget": ["budget"], "runtime": ["runtime"],
                        "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
                        "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
@@ -233,7 +238,8 @@ autoRegressionHandler(movieData, "logisticRegressionResults-0118-2330-basic","re
                       {"budget": lambda val: val is not None,
                        "runtime": lambda val: val > 0});
 
-autoRegressionHandler(movieData, "logisticRegressionResults-0118-2330-runtimeSquare","revenue (Class)",
+# 1b: 基本模型, 固定使用 rumtime-square => revenue
+autoRegressionHandler(movieData, "logisticRegressionResults-revenue-runtimeSquare","revenue (Class)",
                       {"year": ["year"], "budget": ["budget"],
                        "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
                        "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
@@ -246,7 +252,8 @@ autoRegressionHandler(movieData, "logisticRegressionResults-0118-2330-runtimeSqu
                        "runtimeSquare": lambda val: val > 0},
                       {"runtimeSquare": ["runtimeSquare"]});
 
-autoRegressionHandler(movieData, "logisticRegressionResults-0118-2330-budgetLog&runtimeSquare","revenue (Class)",
+# 1c: 基本模型, 固定使用 rumtime-square, budget-log => revenue
+autoRegressionHandler(movieData, "logisticRegressionResults-revenue-budgetLog&runtimeSquare","revenue (Class)",
                       {"year": ["year"], 
                        "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
                        "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
@@ -259,7 +266,8 @@ autoRegressionHandler(movieData, "logisticRegressionResults-0118-2330-budgetLog&
                        "runtimeSquare": lambda val: val > 0},
                       {"budgetLog": ["budgetLog"], "runtimeSquare": ["runtimeSquare"]});
 
-autoRegressionHandler(movieData, "logisticRegressionResults-0118-2330-budgetSquare&runtimeSquare","revenue (Class)",
+# 1d: 基本模型, 固定使用 rumtime-square, budget-log => revenue
+autoRegressionHandler(movieData, "logisticRegressionResults-revenue-budgetSquare&runtimeSquare","revenue (Class)",
                       {"year": ["year"], 
                        "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
                        "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
@@ -271,5 +279,59 @@ autoRegressionHandler(movieData, "logisticRegressionResults-0118-2330-budgetSqua
                       {"budgetSquare": lambda val: val is not None,
                        "runtimeSquare": lambda val: val > 0},
                       {"budgetSquare": ["budgetSquare"], "runtimeSquare": ["runtimeSquare"]})
+
 
-'''
+# 2a: 基本模型 => revpop
+autoRegressionHandler(movieData, "logisticRegressionResults-revPop-basic","revPop (Class)",
+                      {"year": ["year"], "budget": ["budget"], "runtime": ["runtime"],
+                       "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                       "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
+                       "genre": ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                       "production_company": ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                       "month": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"],
+                       "production_country": ["Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France","Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2","Production Country-Seg-3"]
+                       },
+                      {"budget": lambda val: val is not None,
+                       "runtime": lambda val: val > 0});
+
+# 2b: 基本模型, 固定使用 rumtime-square, budget-log => revpop
+autoRegressionHandler(movieData, "logisticRegressionResults-revPop-runtimeSquare","revPop (Class)",
+                      {"year": ["year"], "budget": ["budget"],
+                       "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                       "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
+                       "genre": ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                       "production_company": ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                       "month": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"],
+                       "production_country": ["Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France","Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2","Production Country-Seg-3"]
+                       },
+                      {"budget": lambda val: val is not None,
+                       "runtimeSquare": lambda val: val > 0},
+                      {"runtimeSquare": ["runtimeSquare"]});
+
+# 2c: 基本模型, 固定使用 rumtime-square, budget-log => revpop
+autoRegressionHandler(movieData, "logisticRegressionResults-revPop-budgetLog&runtimeSquare","revPop (Class)",
+                      {"year": ["year"], 
+                       "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                       "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
+                       "genre": ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                       "production_company": ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                       "month": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"],
+                       "production_country": ["Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France","Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2","Production Country-Seg-3"]
+                       },
+                      {"budgetLog": lambda val: val is not None,
+                       "runtimeSquare": lambda val: val > 0},
+                      {"budgetLog": ["budgetLog"], "runtimeSquare": ["runtimeSquare"]});
+
+# 2d: 基本模型, 固定使用 rumtime-square, budget-log => revpop
+autoRegressionHandler(movieData, "logisticRegressionResults-revPop-budgetSquare&runtimeSquare","revPop (Class)",
+                      {"year": ["year"], 
+                       "cast": ["Cast_121323_Bess Flowers","Cast_113_Christopher Lee","Cast_4165_John Wayne","Cast_2231_Samuel L. Jackson","Cast_3895_Michael Caine","Cast-Seg-1","Cast-Seg-2","Cast-Seg-3","Cast-Seg-4"],
+                       "crew": ["Crew_9062_Cedric Gibbons","Crew_2952_Avy Kaufman","Crew_4350_Edith Head","Crew_102429_Roger Corman","Crew_1259_Ennio Morricone","Crew-Seg-1","Crew-Seg-2","Crew-Seg-3","Crew-Seg-4"],
+                       "genre": ["Genre_18_Drama","Genre_35_Comedy","Genre_53_Thriller","Genre_10749_Romance","Genre_28_Action","Genre-Seg-1","Genre-Seg-2"],
+                       "production_company": ["Production Company_6194_Warner Bros.","Production Company_8411_Metro-Goldwyn-Mayer (MGM)","Production Company_4_Paramount Pictures","Production Company_306_Twentieth Century Fox Film Corporation","Production Company_33_Universal Pictures"],
+                       "month": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"],
+                       "production_country": ["Production Country_US_United States of America","Production Country_GB_United Kingdom","Production Country_FR_France","Production Country_DE_Germany","Production Country_IT_Italy","Production Country-Seg-1","Production Country-Seg-2","Production Country-Seg-3"]
+                       },
+                      {"budgetSquare": lambda val: val is not None,
+                       "runtimeSquare": lambda val: val > 0},
+                      {"budgetSquare": ["budgetSquare"], "runtimeSquare": ["runtimeSquare"]});
